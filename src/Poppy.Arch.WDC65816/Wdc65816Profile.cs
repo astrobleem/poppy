@@ -1,4 +1,4 @@
-﻿namespace Poppy.Arch.WDC65816;
+namespace Poppy.Arch.WDC65816;
 
 using System.Collections.Frozen;
 using Poppy.Core.Arch;
@@ -34,6 +34,27 @@ internal sealed class Wdc65816Profile : ITargetProfile {
 			return ((bank & 0x7f) * 0x8000) + (offset - 0x8000);
 		}
 		return -1;
+	}
+
+	/// <inheritdoc />
+	public bool TryDecomposeBankedAddress(long address, out int bank, out long offset) {
+		bank = -1;
+		offset = address;
+
+		// Only 24-bit addresses in LoROM ROM space ($xx8000-$xxffff) decompose;
+		// 16-bit values (e.g., $8000) and non-ROM-mapped addresses are used as-is.
+		if (address <= 0xffff || address > 0xffffff) {
+			return false;
+		}
+
+		var local = address & 0xffff;
+		if (local < 0x8000) {
+			return false;
+		}
+
+		bank = (int)(address >> 16);
+		offset = local;
+		return true;
 	}
 
 	/// <inheritdoc />

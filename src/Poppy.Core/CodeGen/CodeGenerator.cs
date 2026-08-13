@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // CodeGenerator.cs - Binary Code Generation
 // Poppy Compiler - Multi-system Assembly Compiler
 // ============================================================================
@@ -351,7 +351,15 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 				// Emit operand based on size
 				// For 65816 immediate mode, size depends on M/X flags
 				var operandSize = _profile.GetOperandSize(mnemonic, addressingMode, encoding.Size, _processorState);
-				EmitValue(operandValue.Value, operandSize, node.SizeSuffix);
+
+				// Cross-bank long references: fold the target symbol's bank
+				// into the bank byte of the 24-bit operand
+				var effectiveValue = operandValue.Value;
+				if ((operandSize >= 3 || node.SizeSuffix == 'l') && node.Operand is IdentifierNode operandId) {
+					effectiveValue = ApplySymbolBank(operandId, effectiveValue);
+				}
+
+				EmitValue(effectiveValue, operandSize, node.SizeSuffix);
 			}
 
 			// Track processor flag changes (e.g., 65816 REP/SEP)
@@ -669,6 +677,21 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 		if (value.HasValue) {
 			_currentAddress = value.Value;
 
+			// 24-bit .org on banked targets (e.g., SNES LoROM $018000 = bank 1, $8000):
+			// update the bank context so the segment lands at the mapped ROM offset
+			if (_profile.TryDecomposeBankedAddress(value.Value, out var orgBank, out var orgOffset)) {
+				_currentBank = orgBank;
+
+				// Auto-detect bank size if not explicitly set
+				if (_bankSize == 0) {
+					_bankSize = _profile.GetBankSize(_analyzer);
+				}
+
+				_bankRomOffset = (long)orgBank * _bankSize;
+				_bankCpuBase = GetBankCpuBase();
+				_currentAddress = orgOffset;
+			}
+
 			// Create a new segment at the new address
 			_currentSegment = new OutputSegment(_currentAddress);
 
@@ -815,7 +838,14 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 		foreach (var arg in node.Arguments) {
 			var value = _analyzer.EvaluateExpression(arg);
 			if (value.HasValue) {
-				EmitValue(value.Value, bytes, null);
+				var longValue = value.Value;
+
+				// Cross-bank symbol references include the symbol's bank byte
+				if (bytes >= 3 && arg is IdentifierNode idNode) {
+					longValue = ApplySymbolBank(idNode, longValue);
+				}
+
+				EmitValue(longValue, bytes, null);
 			} else {
 				_errors.Add(new CodeError(
 					"Cannot evaluate .long argument",
@@ -825,6 +855,21 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 				}
 			}
 		}
+	}
+
+	/// <summary>
+	/// Folds a referenced symbol's bank into a 16-bit value to form a 24-bit
+	/// banked address. Returns the value unchanged when the symbol is not
+	/// banked or the value already carries bank bits.
+	/// </summary>
+	private long ApplySymbolBank(IdentifierNode idNode, long value) {
+		if (value >= 0 && value <= 0xffff
+			&& _analyzer.SymbolTable.TryGetSymbol(idNode.Name, out var symbol)
+			&& symbol is { Bank: >= 0 }) {
+			return value | ((long)symbol.Bank << 16);
+		}
+
+		return value;
 	}
 
 	/// <summary>

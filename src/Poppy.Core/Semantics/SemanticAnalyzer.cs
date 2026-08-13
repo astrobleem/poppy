@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // SemanticAnalyzer.cs - Semantic Analysis Phase
 // Poppy Compiler - Multi-system Assembly Compiler
 // ============================================================================
@@ -21,6 +21,7 @@ namespace Poppy.Core.Semantics;
 public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 	private readonly MacroExpander _macroExpander;
 	private readonly List<SemanticError> _errors;
+	private readonly List<SemanticWarning> _warnings;
 	private bool _targetSetFromSource;
 	private int _pass;
 	private ITargetProfile? _profile;
@@ -61,6 +62,11 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 	/// Gets all semantic errors.
 	/// </summary>
 	public IReadOnlyList<SemanticError> Errors => _errors;
+
+	/// <summary>
+	/// Gets all semantic warnings.
+	/// </summary>
+	public IReadOnlyList<SemanticWarning> Warnings => _warnings;
 
 	/// <summary>
 	/// Gets whether analysis encountered any errors.
@@ -116,6 +122,7 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 		MacroTable = new MacroTable();
 		_macroExpander = new MacroExpander(MacroTable);
 		_errors = [];
+		_warnings = [];
 		Target = target;
 		CurrentAddress = 0;
 		_pass = 0;
@@ -130,6 +137,7 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 		// First pass: collect definitions
 		_pass = 1;
 		CurrentAddress = 0;
+		CurrentBank = -1;
 		program.Accept(this);
 
 		// Validate all symbols are defined (skip register names for register-based architectures)
@@ -146,6 +154,7 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 		var macroErrorsBeforePass2 = _macroExpander.Errors.Count;
 		_pass = 2;
 		CurrentAddress = 0;
+		CurrentBank = -1;
 		program.Accept(this);
 
 		// Collect any errors from pass 2 (e.g., anonymous label resolution)
@@ -175,11 +184,14 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 				// Named anonymous labels (+name)
 				SymbolTable.DefineNamedAnonymousLabel(node.Name, CurrentAddress, node.Location);
 			} else {
-				SymbolTable.Define(
+				var symbol = SymbolTable.Define(
 					node.Name,
 					SymbolType.Label,
 					CurrentAddress,
 					node.Location);
+				// Record the bank so cross-bank long references (jml/jsl/.dl)
+				// can encode the label's bank byte
+				symbol.Bank = CurrentBank;
 			}
 		}
 
@@ -793,7 +805,15 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 
 		var value = EvaluateExpression(node.Arguments[0]);
 		if (value.HasValue) {
-			CurrentAddress = value.Value;
+			// 24-bit .org on banked targets (e.g., SNES LoROM $018000):
+			// set the current bank and bank-local address consistently
+			if (_profile is not null
+				&& _profile.TryDecomposeBankedAddress(value.Value, out var bank, out var offset)) {
+				CurrentBank = bank;
+				CurrentAddress = offset;
+			} else {
+				CurrentAddress = value.Value;
+			}
 		}
 	}
 
@@ -1210,6 +1230,17 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 
 		if (IsBranchInstruction(mnemonic)) {
 			return 2; // opcode + 1 byte relative offset
+		}
+
+		// Use the encoding table size when the addressing mode is unambiguous.
+		// This handles 65816 mnemonics whose operand size differs from the mode's
+		// usual size (e.g., jml/jsl encode 3 operand bytes even in Absolute mode).
+		if (Target == TargetArchitecture.WDC65816
+			&& node.SizeSuffix is null
+			&& effectiveMode != AddressingMode.Immediate
+			&& sizeProfile is not null
+			&& sizeProfile.Encoder.TryEncode(mnemonic, effectiveMode, out var fixedEncoding)) {
+			return fixedEncoding.Size;
 		}
 
 		// Base opcode is 1 byte

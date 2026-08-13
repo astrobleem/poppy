@@ -1,4 +1,4 @@
-﻿namespace Poppy.Core.Arch;
+namespace Poppy.Core.Arch;
 
 using Poppy.Core.CodeGen;
 using Poppy.Core.Lexer;
@@ -107,6 +107,17 @@ public interface ITargetProfile {
 	/// Default: identity mapping (returns cpuAddress unchanged).
 	/// </summary>
 	int MapCpuToRomOffset(int cpuAddress) => cpuAddress;
+
+	/// <summary>
+	/// Decomposes a full banked CPU address from a 24-bit .org into a bank number
+	/// and a bank-local offset (e.g., SNES LoROM $018000 → bank 1, $8000).
+	/// Returns false when the address should be used as-is (default).
+	/// </summary>
+	bool TryDecomposeBankedAddress(long address, out int bank, out long offset) {
+		bank = -1;
+		offset = address;
+		return false;
+	}
 
 	/// <summary>
 	/// Gets the memory region classification name for an address.

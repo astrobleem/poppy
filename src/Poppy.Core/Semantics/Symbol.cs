@@ -52,6 +52,12 @@ public sealed class Symbol {
 	public bool IsExported { get; set; }
 
 	/// <summary>
+	/// The bank number this symbol was defined in, or -1 if not banked.
+	/// Used to resolve cross-bank long (24-bit) references.
+	/// </summary>
+	public int Bank { get; set; } = -1;
+
+	/// <summary>
 	/// Creates a new symbol.
 	/// </summary>
 	/// <param name="name">The name of the symbol.</param>
@@ -350,6 +356,34 @@ public sealed class SymbolTable {
 	private static bool IsLocalName(string name) {
 		return name.Length > 0 && (name[0] == '.' || name[0] == '@');
 	}
+}
+
+/// <summary>
+/// Represents a semantic analysis warning.
+/// </summary>
+public sealed class SemanticWarning {
+	/// <summary>
+	/// The warning message.
+	/// </summary>
+	public string Message { get; }
+
+	/// <summary>
+	/// The source location where the warning occurred.
+	/// </summary>
+	public SourceLocation Location { get; }
+
+	/// <summary>
+	/// Creates a new semantic warning.
+	/// </summary>
+	/// <param name="message">The warning message.</param>
+	/// <param name="location">The source location.</param>
+	public SemanticWarning(string message, SourceLocation location) {
+		Message = message;
+		Location = location;
+	}
+
+	/// <inheritdoc />
+	public override string ToString() => $"{Location}: warning: {Message}";
 }
 
 /// <summary>

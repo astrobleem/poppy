@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // Parser.cs - Assembly Source Parser
 // Poppy Compiler - Multi-system Assembly Compiler
 // ============================================================================
@@ -211,6 +211,23 @@ public sealed class Parser {
 			return new DirectiveNode(token.Location, "equ", [new IdentifierNode(token.Location, token.Text), value]);
 		}
 
+		// Dotless data directives (WLA-65816 style): db, dw, dl
+		if (IsDotlessDataDirective(token.Text)) {
+			List<ExpressionNode> dataArgs = [];
+
+			if (!IsAtEndOfStatement()) {
+				dataArgs.Add(ParseExpression());
+
+				// Parse additional comma-separated arguments
+				while (Match(TokenType.Comma)) {
+					dataArgs.Add(ParseExpression());
+				}
+			}
+
+			ExpectEndOfStatement();
+			return new DirectiveNode(token.Location, token.Text.ToLowerInvariant(), dataArgs);
+		}
+
 		// Macro invocations MUST start with @
 		if (!isLocal) {
 			throw new ParseException(
@@ -244,6 +261,15 @@ public sealed class Parser {
 		Advance();             // consume the colon
 		var isLocal = token.Text.StartsWith('@');
 		return new LabelNode(token.Location, token.Text, isLocal);
+	}
+
+	/// <summary>
+	/// Checks if an identifier is a dotless data directive (db, dw, dl).
+	/// </summary>
+	private static bool IsDotlessDataDirective(string text) {
+		return text.Equals("db", StringComparison.OrdinalIgnoreCase)
+			|| text.Equals("dw", StringComparison.OrdinalIgnoreCase)
+			|| text.Equals("dl", StringComparison.OrdinalIgnoreCase);
 	}
 
 	private StatementNode ParseInstruction() {
