@@ -248,6 +248,18 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 			var value = TryGetConstantOperandValue(node.Operand);
 			if (value.HasValue) {
 				effectiveMode = ResolveEffectiveSizingMode(node.Mnemonic, effectiveMode, value.Value);
+
+				// A 24-bit memory operand must fit the resolved encoding; the
+				// code generator fails the same way. Without this, the layout
+				// pass would size e.g. 65816 "sta abs,y" and let the bank byte
+				// vanish silently (issue #379).
+				if (_pass == 1 && value.Value > 0xffff
+					&& effectiveMode is not (AddressingMode.AbsoluteLong or AddressingMode.AbsoluteLongX)
+					&& effectiveMode != AddressingMode.Immediate) {
+					_errors.Add(new SemanticError(
+						$"Operand ${value.Value:X6} does not fit the {effectiveMode} encoding; the instruction has no long form for this mode",
+						node.Location));
+				}
 			}
 		}
 

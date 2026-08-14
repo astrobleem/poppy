@@ -352,6 +352,17 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 				// For 65816 immediate mode, size depends on M/X flags
 				var operandSize = _profile.GetOperandSize(mnemonic, addressingMode, encoding.Size, _processorState);
 
+				// A 24-bit memory operand must fit the resolved encoding. If the
+				// mode has no long form (e.g. 65816 "sta abs,y" / "stx abs"),
+				// fail loud instead of silently dropping the bank byte, which
+				// produced wrong-address writes on real hardware (issue #379).
+				if (operandValue.Value > 0xffff && operandSize < 3
+					&& addressingMode != AddressingMode.Immediate) {
+					_errors.Add(new CodeError(
+						$"Operand ${operandValue.Value:X6} does not fit the {addressingMode} encoding ({operandSize} operand bytes); the instruction has no long form for this mode",
+						node.Location));
+				}
+
 				// Cross-bank long references: fold the target symbol's bank
 				// into the bank byte of the 24-bit operand
 				var effectiveValue = operandValue.Value;
