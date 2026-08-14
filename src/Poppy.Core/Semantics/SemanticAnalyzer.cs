@@ -127,6 +127,10 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 		CurrentAddress = 0;
 		_pass = 0;
 		_profile = TargetResolver.TryGetProfile(target);
+		// Match the code generator (which creates its processor state in its own
+		// constructor) so REP/SEP tracking is active even before any target
+		// directive (.snes/.lorom/...) is seen in the source (issue #376 case 3).
+		ProcessorState = _profile?.CreateProcessorState();
 	}
 
 	/// <summary>
@@ -1255,7 +1259,8 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 	/// <summary>
 	/// Tries to get a constant value from an operand expression without side effects.
 	/// Only returns a value for numeric literals and simple constant expressions
-	/// (EQU-defined constants). Does not resolve labels or anonymous references.
+	/// (EQU-defined constants and arithmetic on them). Does not resolve labels or
+	/// anonymous references.
 	/// </summary>
 	private long? TryGetConstantOperandValue(ExpressionNode operand) {
 		if (operand is NumberLiteralNode num) {
@@ -1268,6 +1273,53 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 			symbol is not null && symbol.IsDefined &&
 			symbol.Type == SymbolType.Constant && symbol.Value.HasValue) {
 			return symbol.Value.Value;
+		}
+
+		// Constant-only unary expressions (e.g. -CONST, >CONST, ^CONST).
+		// Kept parallel with EvaluateUnary, but never resolves labels.
+		if (operand is UnaryExpressionNode unary) {
+			var unaryValue = TryGetConstantOperandValue(unary.Operand);
+			if (!unaryValue.HasValue) return null;
+			return unary.Operator switch {
+				UnaryOperator.Negate => -unaryValue.Value,
+				UnaryOperator.BitwiseNot => ~unaryValue.Value,
+				UnaryOperator.LogicalNot => unaryValue.Value == 0 ? 1 : 0,
+				UnaryOperator.LowByte => unaryValue.Value & 0xff,
+				UnaryOperator.HighByte => (unaryValue.Value >> 8) & 0xff,
+				UnaryOperator.BankByte => (unaryValue.Value >> 16) & 0xff,
+				_ => null
+			};
+		}
+
+		// Constant-only binary expressions (e.g. CONST+1, CONST*2). Without this,
+		// the layout pass sizes e.g. "lda CONST+1" as Absolute (3 bytes) while the
+		// code generator optimizes it to ZeroPage (2 bytes), so every later label
+		// and .word reference drifts by one byte per occurrence (issue #376).
+		if (operand is BinaryExpressionNode binary) {
+			var left = TryGetConstantOperandValue(binary.Left);
+			var right = TryGetConstantOperandValue(binary.Right);
+			if (!left.HasValue || !right.HasValue) return null;
+			return binary.Operator switch {
+				BinaryOperator.Add => left.Value + right.Value,
+				BinaryOperator.Subtract => left.Value - right.Value,
+				BinaryOperator.Multiply => left.Value * right.Value,
+				BinaryOperator.Divide => right.Value != 0 ? left.Value / right.Value : null,
+				BinaryOperator.Modulo => right.Value != 0 ? left.Value % right.Value : null,
+				BinaryOperator.BitwiseAnd => left.Value & right.Value,
+				BinaryOperator.BitwiseOr => left.Value | right.Value,
+				BinaryOperator.BitwiseXor => left.Value ^ right.Value,
+				BinaryOperator.LeftShift => left.Value << (int)right.Value,
+				BinaryOperator.RightShift => left.Value >> (int)right.Value,
+				BinaryOperator.Equal => left.Value == right.Value ? 1 : 0,
+				BinaryOperator.NotEqual => left.Value != right.Value ? 1 : 0,
+				BinaryOperator.LessThan => left.Value < right.Value ? 1 : 0,
+				BinaryOperator.GreaterThan => left.Value > right.Value ? 1 : 0,
+				BinaryOperator.LessOrEqual => left.Value <= right.Value ? 1 : 0,
+				BinaryOperator.GreaterOrEqual => left.Value >= right.Value ? 1 : 0,
+				BinaryOperator.LogicalAnd => (left.Value != 0 && right.Value != 0) ? 1 : 0,
+				BinaryOperator.LogicalOr => (left.Value != 0 || right.Value != 0) ? 1 : 0,
+				_ => null
+			};
 		}
 
 		return null;
