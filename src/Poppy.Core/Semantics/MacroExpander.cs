@@ -135,6 +135,16 @@ public sealed class MacroExpander {
 			InstructionNode instruction => ExpandInstruction(instruction, substitutions, macroName, expansionId),
 			LabelNode label => ExpandLabel(label, macroName, expansionId),
 			DirectiveNode directive => ExpandDirective(directive, substitutions, macroName, expansionId),
+			// Nested macro invocation: substitute this macro's parameters into
+			// the invocation's arguments (e.g. "@set_a value" inside a macro
+			// body). Without this the inner argument keeps the outer
+			// parameter name, which resolves as an undefined symbol.
+			MacroInvocationNode invocation => new MacroInvocationNode(
+				invocation.Location,
+				invocation.Name,
+				invocation.Arguments
+					.Select(arg => ExpandExpression(arg, substitutions, macroName, expansionId))
+					.ToList()),
 			_ => statement  // Other statement types pass through unchanged
 		};
 	}

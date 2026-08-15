@@ -22,6 +22,10 @@ public sealed partial class Ca65Converter : BaseConverter {
 	// Track state for multi-line constructs
 	private int _ifDepth;
 
+	// Macro names seen in .macro directives; bare invocations must be
+	// re-emitted with the PASM @ invocation prefix (issue #380 case 3).
+	private readonly HashSet<string> _macroNames = [];
+
 	/// <inheritdoc />
 	protected override string ConvertCode(
 		string code,
@@ -49,13 +53,32 @@ public sealed partial class Ca65Converter : BaseConverter {
 
 		// Check for directives (ca65 directives start with .)
 		if (code.StartsWith('.')) {
-			return ConvertDirective(code, lineNumber, filePath, result, options);
+			var converted = ConvertDirective(code, lineNumber, filePath, result, options);
+			// PASM directives must keep their leading dot: the mapping tables
+			// return the dotless name (e.g. "org $8000", "a16", "db ..."), and
+			// a dotless directive line parses as an instruction/label and is
+			// silently ignored — producing wrong code with exit 0 (issue #380).
+			// Comment lines (unsupported-directive passthrough) are left alone.
+			return converted.Length > 0 && converted[0] != '.' && converted[0] != ';'
+				? "." + converted
+				: converted;
 		}
 
 		// Check for assignments (name = value or name := value)
 		var assignMatch = AssignmentPattern().Match(code);
 		if (assignMatch.Success) {
 			return ConvertAssignment(assignMatch);
+		}
+
+		// Check for macro invocations: PASM invokes macros with an @ prefix.
+		// A bare name parses as an instruction and is silently dropped by the
+		// assembler, so the conversion must re-emit "@name args" (issue #380
+		// case 3).
+		var invocationParts = code.Split([' ', '	'], 2, StringSplitOptions.RemoveEmptyEntries);
+		if (invocationParts.Length > 0 && _macroNames.Contains(invocationParts[0])) {
+			return invocationParts.Length > 1
+				? $"@{invocationParts[0]} {invocationParts[1]}"
+				: $"@{invocationParts[0]}";
 		}
 
 		// Assume it's an instruction
@@ -245,14 +268,17 @@ public sealed partial class Ca65Converter : BaseConverter {
 	private string ConvertMacroStart(string args) {
 		// ca65: .macro name arg1, arg2
 		// PASM: macro name(arg1, arg2)
-		var parts = args.Split([' ', '\t'], 2, StringSplitOptions.RemoveEmptyEntries);
+		var parts = args.Split([' ', '	'], 2, StringSplitOptions.RemoveEmptyEntries);
 		if (parts.Length == 1) {
-			return $"macro {parts[0]}()";
+			var name = parts[0].Split('(', 2)[0].Trim();
+			_macroNames.Add(name);
+			return $"macro {name}()";
 		}
 
-		var name = parts[0];
+		var macroName = parts[0].Split('(', 2)[0].Trim();
+		_macroNames.Add(macroName);
 		var parameters = parts[1];
-		return $"macro {name}({parameters})";
+		return $"macro {macroName}({parameters})";
 	}
 
 	/// <summary>
@@ -447,9 +473,10 @@ public sealed partial class Ca65Converter : BaseConverter {
 	/// Converts operand expressions.
 	/// </summary>
 	private static string ConvertOperand(string operand) {
-		// Convert @local labels to .local
-		operand = LocalLabelPattern().Replace(operand, ".$1");
-
+		// PASM scoped labels use the same @ syntax as ca65, so @references in
+		// operands pass through unchanged (issue #380 case 2). The previous
+		// @ -> . rewrite turned "bne @loop" into "bne .loop", which the
+		// assembler parses as a directive and silently discards.
 		return operand;
 	}
 
@@ -477,10 +504,9 @@ public sealed partial class Ca65Converter : BaseConverter {
 
 	/// <inheritdoc />
 	protected override string ConvertLocalLabel(string label) {
-		// ca65 uses @ for local labels, PASM uses .
-		if (label.StartsWith('@')) {
-			return "." + label[1..];
-		}
+		// ca65 and PASM both use @ for scoped labels; leave them unchanged
+		// (issue #380 case 2). A converted ".loop" parses as a directive and
+		// Poppy's assembler silently discards it.
 		return base.ConvertLocalLabel(label);
 	}
 

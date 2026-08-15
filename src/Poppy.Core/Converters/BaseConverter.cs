@@ -371,9 +371,9 @@ public abstract partial class BaseConverter : IProjectConverter {
 			return label;
 		}
 
-		// ca65 uses @ for local labels
+		// ca65 uses @ for local labels; PASM uses the same @ scoped-label syntax
 		if (label.StartsWith('@')) {
-			return "." + label[1..];
+			return label;
 		}
 
 		// ASAR/xkas use + and - for anonymous labels

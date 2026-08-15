@@ -322,15 +322,19 @@ public class Ca65ConverterTests {
 	}
 
 	[Fact]
-	public void ConvertFile_LocalLabel_ConvertsAtToDot() {
+	public void ConvertFile_LocalLabel_PreservesAt() {
+		// PASM scoped labels use the same @ syntax as ca65 (issue #380 case 2);
+		// converting @loop to .loop turns a valid label into a directive that
+		// Poppy's assembler silently discards.
 		var tempFile = Path.GetTempFileName();
-		File.WriteAllText(tempFile, "@loop:\n\tdex\n\tbne @loop");
+		File.WriteAllText(tempFile, "@loop:\n	dex\n	bne @loop");
 
 		try {
 			var result = _converter.ConvertFile(tempFile, _options);
 
 			Assert.True(result.Success);
-			Assert.Contains(".loop:", result.Content);
+			Assert.Contains("@loop:", result.Content);
+			Assert.DoesNotContain(".loop:", result.Content);
 		}
 		finally {
 			File.Delete(tempFile);

@@ -170,10 +170,16 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 		CurrentBank = -1;
 		program.Accept(this);
 
-		// Collect any errors from pass 2 (e.g., anonymous label resolution)
+		// Collect any errors from pass 2 (e.g., anonymous label resolution).
+		// Macro expansion now runs in both passes, so pass-2 expansion can
+		// re-report the same failure (undefined macro, arg count); dedupe by
+		// message so the same defect does not print twice.
 		_errors.AddRange(SymbolTable.Errors.Skip(_errors.Count));
 		for (var i = macroErrorsBeforePass2; i < _macroExpander.Errors.Count; i++) {
-			_errors.Add(_macroExpander.Errors[i]);
+			var macroError = _macroExpander.Errors[i];
+			if (_errors.All(e => e.Message != macroError.Message)) {
+				_errors.Add(macroError);
+			}
 		}
 	}
 
@@ -677,14 +683,17 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 			arg.Accept(this);
 		}
 
-		// Expand the macro during pass 2
-		if (_pass == 2) {
-			var expandedStatements = _macroExpander.Expand(node, node.Arguments);
+		// Expand in BOTH passes: the code generator expands unconditionally, so
+		// pass 1 must also advance CurrentAddress past the expanded body or
+		// every label after a macro invocation gets a stale address (issue #380
+		// case 3). Argument expressions are substituted structurally and only
+		// evaluated when the expanded statements are visited, so forward
+		// references behave like source-level code.
+		var expandedStatements = _macroExpander.Expand(node, node.Arguments);
 
-			// Visit each expanded statement
-			foreach (var statement in expandedStatements) {
-				statement.Accept(this);
-			}
+		// Visit each expanded statement
+		foreach (var statement in expandedStatements) {
+			statement.Accept(this);
 		}
 
 		return null;
