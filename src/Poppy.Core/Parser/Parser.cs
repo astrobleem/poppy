@@ -73,6 +73,11 @@ public sealed class Parser {
 
 		// Directive (starts with .)
 		if (Check(TokenType.Directive)) {
+			// A dot-prefixed token followed by ':' is a dot-local label
+			// definition (e.g. ".sib:"), not a directive.
+			if (CheckNext(TokenType.Colon)) {
+				return ParseLabelOrIdentifier();
+			}
 			return ParseDirective();
 		}
 
@@ -1256,7 +1261,11 @@ public sealed class Parser {
 		}
 
 		// Identifier
-		if (Check(TokenType.Identifier) || Check(TokenType.Mnemonic)) {
+		// Dot-local label references (e.g. the "beq .sib" operand) tokenize
+		// as Directive tokens (the lexer's dot-prefix rule); accept them as
+		// identifiers here so branch/jump operands resolve. Directive
+		// STATEMENTS are handled earlier at the statement level.
+		if (Check(TokenType.Identifier) || Check(TokenType.Mnemonic) || Check(TokenType.Directive)) {
 			var token = Advance();
 			return new IdentifierNode(token.Location, token.Text);
 		}

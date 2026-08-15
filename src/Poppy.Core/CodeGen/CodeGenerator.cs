@@ -199,6 +199,17 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 	/// <inheritdoc />
 	public object? VisitLabel(LabelNode node) {
 		EnsureSegment(node.Location);
+
+		// Track the current scope so dot-local references resolve to the
+		// enclosing plain label's scoped fullName. The layout's Define
+		// updates CurrentScope while walking the labels; the codegen must
+		// mirror it, or every dot-local reference resolves against the
+		// whole-program FINAL scope (the 649 "Cannot evaluate" errors).
+		var name = node.Name;
+		if (name.Length > 0 && name[0] != '.' && name[0] != '@'
+			&& name[0] != '+' && name[0] != '-') {
+			_analyzer.SymbolTable.CurrentScope = name;
+		}
 		return null;
 	}
 
