@@ -74,6 +74,29 @@ after:
 	}
 
 	[Fact]
+	public void ForwardReferencedConstant_ZeroPageSizing_DoesNotDriftLabels() {
+		// The z80_mem.pasm G8 bug: an EQU constant defined AFTER its use
+		// ("lda FOO" before "FOO = $43") cannot resolve during the layout
+		// sizing pass, so the operand sizes as Absolute (3 bytes) instead
+		// of the emitted ZeroPage (2) — every later label drifts +1 per
+		// use (two uses drifted the blktiger port-in callers by 2).
+		// True layout: lda FOO (2) sta $210D (3) rts (1) = 6 -> $8006.
+		var source = @"
+            .org $8000
+start:
+            lda FOO
+            sta $210D
+            rts
+after:
+            rts
+FOO = $43
+        ";
+		var analyzer = Analyze(source);
+
+		Assert.Equal(0x8006, analyzer.SymbolTable.Symbols["after"].Value);
+	}
+
+	[Fact]
 	public void SepImmediateSizing_DoesNotDriftLabels() {
 		// Issue #376 companion: after "sep #$20", #imm operands are 8-bit
 		// (2-byte instructions), so "after" must sit at $8005, not $8006.

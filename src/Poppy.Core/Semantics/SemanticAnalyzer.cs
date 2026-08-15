@@ -141,6 +141,12 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 	/// </summary>
 	/// <param name="program">The program to analyze.</param>
 	public void Analyze(ProgramNode program) {
+		// Pass 0: pre-register EQU/.define constant definitions so the sizing
+		// pass (pass 1) resolves forward-referenced constants. Without this,
+		// "lda FOO" before "FOO = $43" sizes as Absolute (3 bytes) instead of
+		// the emitted ZeroPage (2), drifting every later label by +1 per use
+		// (the z80_mem.pasm G8 wild-jump root).
+		PreRegisterConstants(program);
 		// First pass: collect definitions
 		_pass = 1;
 		CurrentAddress = 0;
@@ -179,6 +185,30 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 			var macroError = _macroExpander.Errors[i];
 			if (_errors.All(e => e.Message != macroError.Message)) {
 				_errors.Add(macroError);
+			}
+		}
+	}
+
+	/// <summary>
+	/// Pre-registers EQU constant definitions before the sizing pass so
+	/// forward-referenced constants (a constant used before its "= expr" line)
+	/// still size as the code generator will emit them. Without this the sizing
+	/// pass falls back to the parser's Absolute mode for such operands, sizing
+	/// them one byte too large and drifting every later label by +1 per use.
+	/// Only top-level "=" (equ) definitions are pre-registered: .define is
+	/// conditional-aware (.ifdef guards) so it must stay in pass 1's in-order
+	/// flow, and definitions whose value references a not-yet-defined constant
+	/// are likewise left to pass 1.
+	/// </summary>
+	private void PreRegisterConstants(ProgramNode program) {
+		foreach (var statement in program.Statements) {
+			if (statement is not DirectiveNode dir) continue;
+			if (!dir.Name.Equals("equ", StringComparison.OrdinalIgnoreCase)) continue;
+			if (dir.Arguments.Count < 2 || dir.Arguments[0] is not IdentifierNode id) continue;
+			if (SymbolTable.TryGetSymbol(id.Name, out _)) continue;
+			var value = EvaluateExpression(dir.Arguments[1]);
+			if (value.HasValue) {
+				SymbolTable.Define(id.Name, SymbolType.Constant, value, dir.Location);
 			}
 		}
 	}
@@ -969,6 +999,13 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 		}
 
 		var value = EvaluateExpression(node.Arguments[1]);
+		// Constants pre-registered by the forward-reference pre-pass are
+		// already defined with their value; re-defining here would raise the
+		// duplicate-symbol error.
+		if (SymbolTable.TryGetSymbol(nameNode.Name, out var existing)
+			&& existing is not null && existing.IsDefined && existing.Type == SymbolType.Constant) {
+			return;
+		}
 		SymbolTable.Define(nameNode.Name, SymbolType.Constant, value, node.Location);
 	}
 
