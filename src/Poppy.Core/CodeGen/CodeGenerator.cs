@@ -45,6 +45,20 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 	private ProcessorState? _processorState;
 
 	/// <summary>
+	/// Declared-entry M/X snapshot (last explicit .a8/.a16/.i8/.i16 directive).
+	/// Labels following a return instruction reset the inferred state to this
+	/// snapshot instead of leaking the previous routine's tail mode.
+	/// </summary>
+	private bool _declaredAccumulator16Bit;
+	private bool _declaredIndex16Bit;
+
+	/// <summary>
+	/// True when the previous instruction was a return (rts/rtl/rti/brk); the
+	/// next label resets the inferred mode to the declared snapshot.
+	/// </summary>
+	private bool _modeResetPending;
+
+	/// <summary>
 	/// Gets all code generation errors.
 	/// </summary>
 	public IReadOnlyList<CodeError> Errors => _errors;
@@ -117,6 +131,12 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 		_currentAddress = 0;
 		_currentSegment = null;
 		_segments.Clear();
+		// Fresh M/X inference per Generate call (the analyzer resets per pass;
+		// the codegen must not start with a previous run's tail mode).
+		_processorState = _profile.CreateProcessorState();
+		_declaredAccumulator16Bit = false;
+		_declaredIndex16Bit = false;
+		_modeResetPending = false;
 
 		// Generate code for all statements
 		foreach (var statement in program.Statements) {
@@ -199,6 +219,16 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 	/// <inheritdoc />
 	public object? VisitLabel(LabelNode node) {
 		EnsureSegment(node.Location);
+
+		// Mirror the analyzer's mode reset at labels following a return:
+		// the label is an external entry point, so the inferred M/X state
+		// resets to the declared snapshot instead of leaking the previous
+		// routine's tail mode.
+		if (_modeResetPending && _processorState is not null) {
+			_processorState.AccumulatorIs16Bit = _declaredAccumulator16Bit;
+			_processorState.IndexIs16Bit = _declaredIndex16Bit;
+			_modeResetPending = false;
+		}
 
 		// Track the current scope so dot-local references resolve to the
 		// enclosing plain label's scoped fullName. The layout's Define
@@ -388,9 +418,33 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 			_profile.UpdateProcessorFlags(mnemonic, operandValue, _processorState);
 		}
 
+		// A return instruction ends the linear fall-through: the next label
+		// is an external entry point whose mode must reset to the declared
+		// snapshot (handled in VisitLabel). Same set as the analyzer:
+		// rts/rtl/rti/brk only — jmp/bra targets keep the linear mode
+		// (same-routine continuation points). Deliberately outside the
+		// operand block: returns are implied instructions with no operand.
+		if (IsReturnInstruction(mnemonic)) {
+			_modeResetPending = true;
+		}
+
 		RecordListingEntry(instructionStartAddress, node.Location);
 
 		return null;
+	}
+
+	/// <summary>
+	/// Returns true for 65816 instructions that unconditionally end the linear
+	/// fall-through and transfer control to an external/call site: rts, rtl,
+	/// rti, brk. jmp/jml/bra/brl are deliberately excluded (same-routine
+	/// continuation targets keep the linear mode inference). Mirrors the
+	/// analyzer's IsReturnInstruction.
+	/// </summary>
+	private static bool IsReturnInstruction(string mnemonic) {
+		return mnemonic.Equals("rts", StringComparison.OrdinalIgnoreCase)
+			|| mnemonic.Equals("rtl", StringComparison.OrdinalIgnoreCase)
+			|| mnemonic.Equals("rti", StringComparison.OrdinalIgnoreCase)
+			|| mnemonic.Equals("brk", StringComparison.OrdinalIgnoreCase);
 	}
 
 	/// <summary>
@@ -542,6 +596,11 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 			case "i16":
 				if (_processorState is not null) {
 					_profile.TryHandleProcessorDirective(node.Name.ToLowerInvariant(), _processorState);
+					// Snapshot the declared entry state so labels following a
+					// return instruction reset to it instead of leaking the
+					// previous routine's tail mode.
+					_declaredAccumulator16Bit = _processorState.AccumulatorIs16Bit;
+					_declaredIndex16Bit = _processorState.IndexIs16Bit;
 				}
 				break;
 

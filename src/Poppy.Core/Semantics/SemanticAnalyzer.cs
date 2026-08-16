@@ -52,6 +52,24 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 	public ProcessorState? ProcessorState { get; private set; }
 
 	/// <summary>
+	/// Snapshot of the M/X flags as last declared by an explicit .a8/.a16/.i8/.i16
+	/// directive (default: 8-bit). At a label that follows an unconditional
+	/// control-flow transfer (rts/rtl/rti/brk/jmp/jml/bra/brl) the linear REP/SEP
+	/// inference is meaningless — the label is a jump/return target whose entry
+	/// mode cannot be known from fall-through — so the inferred state resets to
+	/// this declared snapshot instead of leaking the previous routine's tail mode.
+	/// </summary>
+	private bool _declaredAccumulator16Bit;
+	private bool _declaredIndex16Bit;
+
+	/// <summary>
+	/// True when the previous instruction was an unconditional control-flow
+	/// transfer; the next label then resets the inferred mode to the declared
+	/// snapshot (see <see cref="_declaredAccumulator16Bit"/>).
+	/// </summary>
+	private bool _modeResetPending;
+
+	/// <summary>
 	/// Gets whether the accumulator is in 16-bit mode (65816 M flag clear).
 	/// </summary>
 	public bool AccumulatorIs16Bit => ProcessorState?.AccumulatorIs16Bit ?? false;
@@ -154,6 +172,7 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 		_sectionStart = 0;
 		_sectionBank = -1;
 		_orgSections.Clear();
+		ResetModeTracking();
 		program.Accept(this);
 
 		// Close the final .org section (collision check for the trailing bytes).
@@ -174,6 +193,7 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 		_pass = 2;
 		CurrentAddress = 0;
 		CurrentBank = -1;
+		ResetModeTracking();
 		program.Accept(this);
 
 		// Collect any errors from pass 2 (e.g., anonymous label resolution).
@@ -224,6 +244,19 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 
 	/// <inheritdoc />
 	public object? VisitLabel(LabelNode node) {
+		// A label following an unconditional control-flow transfer is a
+		// jump/return target: the linear REP/SEP inference from the previous
+		// routine's tail is meaningless there (the mode at the target is set
+		// by whatever jumped/called in, not by fall-through). Reset the
+		// inferred M/X state to the last explicitly-declared directive state
+		// so a handler that does not re-establish its own mode is sized from
+		// the declared entry contract instead of the previous routine's tail.
+		if (_modeResetPending && ProcessorState is not null) {
+			ProcessorState.AccumulatorIs16Bit = _declaredAccumulator16Bit;
+			ProcessorState.IndexIs16Bit = _declaredIndex16Bit;
+			_modeResetPending = false;
+		}
+
 		if (_pass == 1) {
 			// Handle anonymous labels (+ or -)
 			if (IsAnonymousLabelName(node.Name)) {
@@ -285,6 +318,21 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 			TrackRepSep(node);
 		}
 
+		// A return instruction (rts/rtl/rti/brk) ends the linear fall-through:
+		// the next label is an EXTERNAL entry point (jumped/called in from
+		// somewhere else), so the inferred mode must reset there to the
+		// declared directive state (handled in VisitLabel). jmp/jml/bra/brl
+		// deliberately do NOT trigger this: their targets are commonly
+		// same-routine continuation labels reached with the linear mode
+		// (e.g. the dispatch's `jmp ($C81B,x)` followed by `dispatch_cb:`
+		// which is entered via `beq dispatch_cb` in 16-bit mode). The flag is
+		// never cleared by a non-return instruction: anything between the
+		// return and the next label is unreachable dead code, and the label
+		// is still an entry point.
+		if (IsReturnInstruction(node.Mnemonic)) {
+			_modeResetPending = true;
+		}
+
 		// Resolve effective addressing mode for sizing (match code generator's optimizations)
 		// Only optimize for operands with known constant values to avoid interfering
 		// with anonymous label resolution or forward reference tracking.
@@ -313,6 +361,32 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 		CurrentAddress += size;
 
 		return null;
+	}
+
+	/// <summary>
+	/// Returns true for 65816 instructions that unconditionally end the linear
+	/// fall-through and transfer control to an external/call site: rts, rtl,
+	/// rti, brk. jmp/jml/bra/brl are deliberately excluded (same-routine
+	/// continuation targets keep the linear mode inference).
+	/// </summary>
+	private static bool IsReturnInstruction(string mnemonic) {
+		return mnemonic.Equals("rts", StringComparison.OrdinalIgnoreCase)
+			|| mnemonic.Equals("rtl", StringComparison.OrdinalIgnoreCase)
+			|| mnemonic.Equals("rti", StringComparison.OrdinalIgnoreCase)
+			|| mnemonic.Equals("brk", StringComparison.OrdinalIgnoreCase);
+	}
+
+	/// <summary>
+	/// Resets the inferred M/X state to the profile default and clears the
+	/// declared snapshot and pending-reset flag. Called at the start of every
+	/// pass so pass 2 sizes identically to pass 1 (a stale tail mode from the
+	/// end of pass 1 would otherwise leak into the beginning of pass 2).
+	/// </summary>
+	private void ResetModeTracking() {
+		ProcessorState = _profile?.CreateProcessorState();
+		_declaredAccumulator16Bit = false;
+		_declaredIndex16Bit = false;
+		_modeResetPending = false;
 	}
 
 	/// <summary>
@@ -501,6 +575,11 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 			case "smart":
 				if (ProcessorState is not null) {
 					_profile?.TryHandleProcessorDirective(node.Name.ToLowerInvariant(), ProcessorState);
+					// Snapshot the declared entry state so labels following a
+					// return instruction reset to it instead of leaking the
+					// previous routine's tail mode.
+					_declaredAccumulator16Bit = ProcessorState.AccumulatorIs16Bit;
+					_declaredIndex16Bit = ProcessorState.IndexIs16Bit;
 				}
 				break;
 
