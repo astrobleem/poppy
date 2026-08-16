@@ -1856,7 +1856,7 @@ main_loop:
 		try {
 			program = parser.Parse();
 		} catch (ParseException ex) {
-			Console.Error.WriteLine($"{inputFile}:{ex.Location.Line}:{ex.Location.Column}: error: {ex.Message}");
+			Console.Error.WriteLine($"{ex.Location.FilePath}:{ex.Location.Line}:{ex.Location.Column}: error: {ex.Message}");
 			return 1;
 		}
 
@@ -1871,7 +1871,7 @@ main_loop:
 
 		if (analyzer.HasErrors) {
 			foreach (var error in analyzer.Errors) {
-				Console.Error.WriteLine($"{inputFile}:{error.Location.Line}:{error.Location.Column}: error: {error.Message}");
+				Console.Error.WriteLine($"{error.Location.FilePath}:{error.Location.Line}:{error.Location.Column}: error: {error.Message}");
 			}
 
 			return 1;
@@ -1915,7 +1915,7 @@ main_loop:
 
 		if (generator.HasErrors) {
 			foreach (var error in generator.Errors) {
-				Console.Error.WriteLine($"{inputFile}:{error.Location.Line}:{error.Location.Column}: error: {error.Message}");
+				Console.Error.WriteLine($"{error.Location.FilePath}:{error.Location.Line}:{error.Location.Column}: error: {error.Message}");
 			}
 
 			return 1;
