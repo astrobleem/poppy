@@ -17,6 +17,7 @@ public sealed class Lexer {
 	private int _position;
 	private int _line;
 	private int _column;
+	private TokenType _previousTokenType = TokenType.Newline;
 
 	/// <summary>
 	/// Creates a new lexer for the given source code.
@@ -337,8 +338,9 @@ public sealed class Lexer {
 			return MakeToken(TokenType.AnonymousForward, "++", location);
 		}
 
-		// Check for +name (named anonymous forward)
-		if (IsIdentifierStart(Peek())) {
+		// Check for +name (named anonymous forward). Only in prefix position: after
+		// something that ends an operand this is addition (issue #388).
+		if (IsIdentifierStart(Peek()) && !PreviousTokenEndsOperand()) {
 			var start = _position - 1; // include the +
 			while (IsIdentifierContinue(Peek())) {
 				Advance();
@@ -361,8 +363,9 @@ public sealed class Lexer {
 			return MakeToken(TokenType.AnonymousBackward, "--", location);
 		}
 
-		// Check for -name (named anonymous backward)
-		if (IsIdentifierStart(Peek())) {
+		// Check for -name (named anonymous backward). Only in prefix position: after
+		// something that ends an operand this is subtraction (issue #388).
+		if (IsIdentifierStart(Peek()) && !PreviousTokenEndsOperand()) {
 			var start = _position - 1; // include the -
 			while (IsIdentifierContinue(Peek())) {
 				Advance();
@@ -422,8 +425,32 @@ public sealed class Lexer {
 	private SourceLocation CurrentLocation() =>
 		new(_filePath, _line, _column, _position);
 
-	private Token MakeToken(TokenType type, string text, SourceLocation? location = null, long? value = null) =>
-		new(type, text, location ?? CurrentLocation(), value);
+	private Token MakeToken(TokenType type, string text, SourceLocation? location = null, long? value = null) {
+		if (type != TokenType.Comment) {
+			_previousTokenType = type;
+		}
+
+		return new(type, text, location ?? CurrentLocation(), value);
+	}
+
+	/// <summary>
+	/// True when the token just emitted can end an operand, which makes a following
+	/// '+'/'-' a binary operator rather than the start of a named anonymous label
+	/// reference. Without this, "lda #$ffff-SIZE" lexed "-SIZE" as a label and the
+	/// subtraction was silently dropped from the expression (issue #388).
+	/// </summary>
+	private bool PreviousTokenEndsOperand() => _previousTokenType switch {
+		TokenType.Number
+		or TokenType.Identifier
+		or TokenType.String
+		or TokenType.RightParen
+		or TokenType.RightBracket
+		or TokenType.AnonymousForward
+		or TokenType.AnonymousBackward
+		or TokenType.NamedAnonymousForward
+		or TokenType.NamedAnonymousBackward => true,
+		_ => false,
+	};
 
 	private static bool IsDigit(char c, int @base) => @base switch {
 		2 => c == '0' || c == '1',

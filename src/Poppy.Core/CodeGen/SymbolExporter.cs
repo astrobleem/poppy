@@ -103,7 +103,7 @@ public sealed class SymbolExporter {
 
 			var address = symbol.Value.Value;
 			var name = symbol.Name;
-			var bank = GetBank(address);
+			var bank = GetBank(symbol);
 
 			sb.AppendLine($"{bank:X2}:{address:X4} {name}");
 		}
@@ -130,9 +130,18 @@ public sealed class SymbolExporter {
 	}
 
 	/// <summary>
-	/// Gets the bank number for an address.
+	/// Gets the bank number for a symbol. The bank recorded when the symbol was
+	/// defined (from the enclosing .bank directive) wins over one derived from the
+	/// address, because the address alone cannot distinguish, say, $8000 in bank 0
+	/// from $8000 in bank 1 - deriving it made every label outside bank 0 export as
+	/// bank 00 (issue #387). Symbols defined with no .bank in effect keep Bank = -1
+	/// and fall back to the address-derived value.
 	/// </summary>
-	private byte GetBank(long address) {
-		return (byte)(_profile?.GetAddressBank(address) ?? 0);
+	private byte GetBank(Symbol symbol) {
+		if (symbol.Bank >= 0) {
+			return (byte)symbol.Bank;
+		}
+
+		return (byte)(_profile?.GetAddressBank(symbol.Value ?? 0) ?? 0);
 	}
 }

@@ -404,6 +404,28 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 						node.Location));
 				}
 
+				// A size suffix narrower than the selected encoding truncates the
+				// operand without shortening the opcode, so the CPU decodes into
+				// the following instruction. This is the mirror of the check
+				// above: there a long form did not exist, here one was chosen and
+				// then undercut (e.g. "sta.w $7E1234,x" resolves to the long
+				// indexed opcode $9f and then emits only two operand bytes).
+				// Immediate is exempt - there the suffix legitimately overrides
+				// the M/X-flag-derived width (issue #385).
+				var suffixBytes = node.SizeSuffix switch {
+					'b' => 1,
+					'w' => 2,
+					'l' => 3,
+					_ => 0
+				};
+
+				if (suffixBytes > 0 && suffixBytes < operandSize
+					&& addressingMode != AddressingMode.Immediate) {
+					_errors.Add(new CodeError(
+						$"Size suffix '.{node.SizeSuffix}' requests a {suffixBytes}-byte operand, but ${operandValue.Value:X6} resolved to the {addressingMode} encoding, which takes {operandSize}; emitting it would truncate the instruction",
+						node.Location));
+				}
+
 				// Cross-bank long references: fold the target symbol's bank
 				// into the bank byte of the 24-bit operand
 				var effectiveValue = operandValue.Value;

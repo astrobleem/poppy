@@ -520,6 +520,10 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 				HandleSpaceDirective(node);
 				break;
 
+			case "incbin":
+				HandleIncbinDirective(node);
+				break;
+
 			case "define":
 				HandleDefineDirective(node);
 				break;
@@ -1118,6 +1122,59 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 		if (count.HasValue) {
 			CurrentAddress += count.Value;
 		}
+	}
+
+	/// <summary>
+	/// Handles .incbin during the layout pass: advances the address counter by the
+	/// number of bytes the code generator will emit for this file, so that every
+	/// symbol defined after an .incbin gets its real address. Any problem with the
+	/// file itself (missing, unreadable, bad offset/length) is left for the code
+	/// generator to report, so it is diagnosed exactly once.
+	/// </summary>
+	private void HandleIncbinDirective(DirectiveNode node) {
+		if (node.Arguments.Count < 1 || node.Arguments[0] is not StringLiteralNode filenameNode) {
+			return;
+		}
+
+		// Resolve relative to the source file, matching CodeGenerator.HandleIncbinDirective.
+		var basePath = Path.GetDirectoryName(node.Location.FilePath) ?? ".";
+		var fullPath = Path.Combine(basePath, filenameNode.Value);
+
+		long fileLength;
+		try {
+			var info = new FileInfo(fullPath);
+			if (!info.Exists) {
+				return;
+			}
+
+			fileLength = info.Length;
+		} catch (Exception) {
+			return;
+		}
+
+		long offset = 0;
+		long length = fileLength;
+
+		if (node.Arguments.Count >= 2) {
+			var offsetValue = EvaluateExpression(node.Arguments[1]);
+			if (offsetValue.HasValue) {
+				offset = offsetValue.Value;
+			}
+		}
+
+		if (node.Arguments.Count >= 3) {
+			var lengthValue = EvaluateExpression(node.Arguments[2]);
+			if (lengthValue.HasValue) {
+				length = lengthValue.Value;
+			}
+		}
+
+		// Out-of-range offset/length emits nothing; the generator reports the error.
+		if (offset < 0 || offset >= fileLength || length < 0 || offset + length > fileLength) {
+			return;
+		}
+
+		CurrentAddress += length;
 	}
 
 	/// <summary>

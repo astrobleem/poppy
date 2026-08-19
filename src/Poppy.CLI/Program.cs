@@ -1860,6 +1860,19 @@ main_loop:
 			return 1;
 		}
 
+		// Parser.Parse() recovers from errors and keeps going so it can report more
+		// than one per run; the errors it collected must still fail the build. Without
+		// this, a statement the parser could not understand (an unknown mnemonic, an
+		// unsupported macro invocation syntax) is silently dropped from the output and
+		// the assembler reports success.
+		if (parser.HasErrors) {
+			foreach (var error in parser.Errors) {
+				Console.Error.WriteLine($"{error.Location.FilePath}:{error.Location.Line}:{error.Location.Column}: error: {error.Message}");
+			}
+
+			return 1;
+		}
+
 		if (options.Verbose) {
 			Console.WriteLine($"  Parsed: {program.Statements.Count} statements");
 		}

@@ -236,7 +236,8 @@ public sealed class Parser {
 		// Macro invocations MUST start with @
 		if (!isLocal) {
 			throw new ParseException(
-				$"Unexpected identifier '{token.Text}'. Did you mean '@{token.Text}' for a macro invocation?",
+				$"Unknown instruction or macro '{token.Text}'. It is not a mnemonic for the "
+				+ $"current target; if it is a macro invocation, write it as '@{token.Text}'.",
 				token.Location);
 		}
 

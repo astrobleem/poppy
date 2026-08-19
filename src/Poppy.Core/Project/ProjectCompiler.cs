@@ -318,6 +318,17 @@ public sealed class ProjectCompiler {
 			return null;
 		}
 
+		// Parse() recovers and continues after an error so it can report several per
+		// run, but the recovered-from errors must still fail the build - otherwise the
+		// unparsed statements are silently dropped from the output.
+		if (parser.HasErrors) {
+			foreach (var error in parser.Errors) {
+				_errors.Add(new ProjectError(error.Message, error.Location.FilePath, error.Location.Line, error.Location.Column));
+			}
+
+			return null;
+		}
+
 		return program.Statements.ToList();
 	}
 
