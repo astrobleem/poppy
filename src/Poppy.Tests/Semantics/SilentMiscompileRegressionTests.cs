@@ -1,7 +1,7 @@
 // Poppy Compiler - Silent Miscompile Regression Tests
 // Copyright © 2026
 //
-// Regression coverage for five defects that each produced a wrong binary with
+// Regression coverage for defects that each produced a wrong binary with
 // no diagnostic at all, so nothing downstream could tell the build had failed:
 //
 //   #382 - parse errors collected and then discarded
@@ -11,6 +11,8 @@
 //   #387 - the generic .sym exporter deriving banks from addresses
 //   #388 - "-name" lexed as a named anonymous label in operand position, so
 //          the subtraction in "#$ffff-SIZE" was silently dropped
+//   #389 - the ^ (bank-byte) operator ignoring a referenced symbol's real
+//          bank and always evaluating to 0
 
 using Poppy.Core.Arch;
 using Poppy.Core.CodeGen;
@@ -246,5 +248,25 @@ public sealed class SilentMiscompileRegressionTests {
 		} finally {
 			if (File.Exists(path)) File.Delete(path);
 		}
+	}
+
+	// ------------------------------------------------------------------
+	// #389 - the ^ (bank-byte) operator ignores a label's real bank
+	// ------------------------------------------------------------------
+
+	[Fact]
+	public void BankByteOperator_UsesTheLabelsRealBank() {
+		// EvaluateIdentifier only ever returned Symbol.Value (a plain 16-bit
+		// address) -- the bank lives in the separate Symbol.Bank field, which
+		// CodeGenerator.ApplySymbolBank already folds in for jsl/.long
+		// operands. `^` was the one reference form that never consulted it,
+		// so `lda #^(bank_one)` always emitted $00 regardless of bank_one's
+		// real bank ($01 here).
+		var source = ".snes\n.bank 0\n.org $8000\n.a8\n    lda #^(bank_one)\n    rts\n" +
+			".bank 1\n.org $8000\nbank_one:\n    lda #$aa\n    rtl\n";
+		var (code, _, _, _) = Assemble(source);
+
+		Assert.Equal(0xA9, code[0]); // LDA #imm
+		Assert.Equal(0x01, code[1]); // bank_one's real bank, not $00
 	}
 }

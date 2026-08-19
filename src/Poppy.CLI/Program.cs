@@ -1890,6 +1890,16 @@ main_loop:
 			return 1;
 		}
 
+		// Warnings don't fail the build, but analyzer.Warnings was never
+		// printed anywhere on this path -- SemanticAnalyzer collected them
+		// into a list nothing read, so any warning-only diagnostic (e.g. the
+		// #386 width-inference-at-branch-target hazard) was silently
+		// unreachable from the CLI regardless of how well the analysis
+		// itself worked.
+		foreach (var warning in analyzer.Warnings) {
+			Console.Error.WriteLine($"{warning.Location.FilePath}:{warning.Location.Line}:{warning.Location.Column}: warning: {warning.Message}");
+		}
+
 		if (options.Verbose) {
 			Console.WriteLine($"  Analyzed: {analyzer.SymbolTable.Symbols.Count} symbols defined");
 		}

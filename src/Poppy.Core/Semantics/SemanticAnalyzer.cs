@@ -207,6 +207,106 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 				_errors.Add(macroError);
 			}
 		}
+
+		// #386: flag the narrow, mechanical branch-over-rep/sep width hazard.
+		// Independent of both passes above -- it only reads the already-parsed
+		// statement list, not addresses or symbol values.
+		DetectBranchOverWidthChangeHazards(program);
+	}
+
+	/// <summary>
+	/// Poppy#386: M/X width inference is linear over source order, not
+	/// control flow. A rep/sep between a conditional branch and its target
+	/// label still updates the inferred state used to size the target's own
+	/// immediates, even on the branch-taken path that never executed that
+	/// rep/sep -- an immediate sized for the wrong width there misaligns
+	/// every byte after it (the classic symptom: a phantom BRK a few bytes
+	/// later in a disassembly).
+	///
+	/// Full control-flow analysis is not attempted here (issue #386's own
+	/// scope note: "not necessary... a warning covering the narrow,
+	/// mechanical case would be enough"). This flags exactly that case: a
+	/// conditional branch whose target is reached with a rep/sep textually
+	/// between the branch and the label, where the label's own code reaches
+	/// a width-dependent immediate before its own explicit .a8/.a16/.i8/.i16
+	/// (or its own rep/sep, which re-syncs the same way). It does not
+	/// attempt to determine whether the rep/sep "belongs" to a different
+	/// conditional path -- Poppy's inference is textual, not path-aware, so
+	/// any rep/sep in that range is a real hazard regardless of intent.
+	///
+	/// Backward branches are skipped: the label there was already visited in
+	/// linear order when originally reached, so there is no "skipped" region
+	/// between the branch and a label that precedes it.
+	/// </summary>
+	private void DetectBranchOverWidthChangeHazards(ProgramNode program) {
+		if (Target != TargetArchitecture.WDC65816) return;
+
+		var statements = program.Statements;
+		var labelIndex = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+		for (var i = 0; i < statements.Count; i++) {
+			if (statements[i] is LabelNode label
+				&& !IsAnonymousLabelName(label.Name)
+				&& !IsNamedAnonymousLabelName(label.Name)) {
+				labelIndex[label.Name] = i;
+			}
+		}
+
+		var warnedStatements = new HashSet<int>();
+
+		for (var i = 0; i < statements.Count; i++) {
+			if (statements[i] is not InstructionNode branch) continue;
+			if (!IsConditionalBranchMnemonic(branch.Mnemonic)) continue;
+			if (branch.Operand is not IdentifierNode target) continue;
+			if (!labelIndex.TryGetValue(target.Name, out var labelPos)) continue;
+			if (labelPos <= i) continue; // backward branch: not this hazard shape
+
+			var repSepBetween = false;
+			for (var j = i + 1; j < labelPos; j++) {
+				if (statements[j] is InstructionNode maybeRepSep && IsRepSepMnemonic(maybeRepSep.Mnemonic)) {
+					repSepBetween = true;
+					break;
+				}
+			}
+			if (!repSepBetween) continue;
+
+			for (var j = labelPos + 1; j < statements.Count; j++) {
+				var stmt = statements[j];
+				if (stmt is LabelNode) break; // reached the next label -- no hazard here
+				if (stmt is DirectiveNode dir && IsWidthDirectiveName(dir.Name)) break; // explicit override
+				if (stmt is InstructionNode instr) {
+					if (IsRepSepMnemonic(instr.Mnemonic)) break; // re-syncs the width itself
+					if (IsWidthDependentImmediate(instr) && warnedStatements.Add(j)) {
+						_warnings.Add(new SemanticWarning(
+							$"'{target.Name}' is a branch target reached via '{branch.Mnemonic}' " +
+							$"(line {branch.Location.Line}) with a rep/sep between the branch and " +
+							"this label; the immediate below may be sized for the wrong M/X width " +
+							"unless this label opens with an explicit .a8/.a16/.i8/.i16 (or its own " +
+							"rep/sep). See poppy#386.",
+							stmt.Location));
+					}
+					break;
+				}
+			}
+		}
+	}
+
+	private static bool IsConditionalBranchMnemonic(string mnemonic) => mnemonic.ToLowerInvariant() switch {
+		"bcc" or "bcs" or "beq" or "bne" or "bpl" or "bmi" or "bvc" or "bvs" => true,
+		_ => false
+	};
+
+	private static bool IsRepSepMnemonic(string mnemonic) =>
+		mnemonic.Equals("rep", StringComparison.OrdinalIgnoreCase)
+		|| mnemonic.Equals("sep", StringComparison.OrdinalIgnoreCase);
+
+	private static bool IsWidthDirectiveName(string name) =>
+		name.ToLowerInvariant() is "a8" or "a16" or "i8" or "i16";
+
+	private static bool IsWidthDependentImmediate(InstructionNode instr) {
+		if (instr.AddressingMode != AddressingMode.Immediate) return false;
+		return instr.Mnemonic.ToLowerInvariant() is
+			"lda" or "adc" or "sbc" or "cmp" or "and" or "ora" or "eor" or "bit"
+			or "ldx" or "ldy" or "cpx" or "cpy";
 	}
 
 	/// <summary>
@@ -1423,9 +1523,32 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 			UnaryOperator.LogicalNot => operand.Value == 0 ? 1 : 0,
 			UnaryOperator.LowByte => operand.Value & 0xff,
 			UnaryOperator.HighByte => (operand.Value >> 8) & 0xff,
-			UnaryOperator.BankByte => (operand.Value >> 16) & 0xff,
+			UnaryOperator.BankByte => (ApplySymbolBankForUnary(node.Operand, operand.Value) >> 16) & 0xff,
 			_ => null
 		};
+	}
+
+	/// <summary>
+	/// Folds a referenced symbol's bank into a 16-bit value to form a 24-bit
+	/// banked address, for `^` (bank-byte) evaluation.
+	///
+	/// Without this, `^(Label)` on a label defined under a non-zero `.bank`
+	/// always evaluated to 0: EvaluateIdentifier only returns Symbol.Value (a
+	/// plain 16-bit address) -- the bank lives in the separate Symbol.Bank
+	/// field (see Symbol.cs) and was never consulted here, even though
+	/// CodeGenerator's own ApplySymbolBank (used for jsl/.long operands) has
+	/// done exactly this fold since cross-bank references were fixed. `^`
+	/// was the one reference form that pass didn't cover.
+	/// </summary>
+	private long ApplySymbolBankForUnary(ExpressionNode operandNode, long value) {
+		if (value >= 0 && value <= 0xffff
+			&& operandNode is IdentifierNode idNode
+			&& SymbolTable.TryGetSymbol(idNode.Name, out var symbol)
+			&& symbol is { Bank: >= 0 }) {
+			return value | ((long)symbol.Bank << 16);
+		}
+
+		return value;
 	}
 
 	// ========================================================================
