@@ -54,19 +54,20 @@ endmacro
 ### Poppy Style
 ```asm
 .macro MyMacro, param1, param2
-    lda \param1
-    sta \param2
+    lda param1
+    sta param2
 .endmacro
 
-%MyMacro $10, $20
+@MyMacro $10, $20
 ```
 
 ### Key Differences
 
 - Use `.macro` and `.endmacro` with dot prefix
 - Parameters listed after macro name with commas
-- Parameter references use `\param` instead of `<param>`
-- Invocation uses `%` prefix (same as ASAR)
+- Parameter references are the bare parameter name, not `<param>` (and not
+  `\param` -- a backslash is a lexer error)
+- Invocation uses an `@` prefix, NOT ASAR's `%`
 - No parentheses around arguments in invocation
 
 ## Label Syntax
@@ -306,9 +307,9 @@ PlayerX = $0010
 PlayerY = $0012
 
 .macro SetPosition, x, y
-    lda #\x
+    lda #x
     sta PlayerX
-    lda #\y
+    lda #y
     sta PlayerY
 .endmacro
 
@@ -318,7 +319,7 @@ Reset:
     xce
     rep #$30
     
-    %SetPosition $80, $70
+    @SetPosition $80, $70
     
 -:
     wai
@@ -346,7 +347,7 @@ Reset:
 ## Tips for Migration
 
 1. **Add dot prefixes** to all directives (`.org`, `.db`, etc.)
-2. **Convert macro syntax** - parameters use backslash, not angle brackets
+2. **Convert macro syntax** - parameters are bare names, not angle brackets, and invocations use `@`, not `%`
 3. **Remove `!` prefix** from constants
 4. **Add colons** to anonymous labels
 5. **Use parentheses** for byte-selection operators in expressions
