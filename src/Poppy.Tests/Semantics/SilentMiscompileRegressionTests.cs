@@ -13,6 +13,10 @@
 //          the subtraction in "#$ffff-SIZE" was silently dropped
 //   #389 - the ^ (bank-byte) operator ignoring a referenced symbol's real
 //          bank and always evaluating to 0
+//   #390 - resuming a previously-visited bank with no explicit .org reset
+//          the address cursor to that OTHER bank's leftover value instead
+//          of resuming where this bank's own code left off, so labels and
+//          bytes both landed at the wrong address and overwrote each other
 
 using Poppy.Core.Arch;
 using Poppy.Core.CodeGen;
@@ -268,5 +272,33 @@ public sealed class SilentMiscompileRegressionTests {
 
 		Assert.Equal(0xA9, code[0]); // LDA #imm
 		Assert.Equal(0x01, code[1]); // bank_one's real bank, not $00
+	}
+
+	// ------------------------------------------------------------------
+	// #390 - resuming a bank with no .org must continue that bank's own
+	// cursor, not inherit wherever some other bank left off
+	// ------------------------------------------------------------------
+
+	[Fact]
+	public void ResumingABank_WithNoOrg_ContinuesThatBanksOwnCursor() {
+		// SemanticAnalyzer.HandleBankDirective and CodeGenerator.HandleBankDirective
+		// each unconditionally overwrote CurrentAddress/_currentAddress on every
+		// .bank switch. Marker_D (back in bank 0 after a visit to bank 1) landed
+		// at $8000 (bank 1's org) instead of $8002 (right after Marker_B), and its
+		// byte overwrote the first sei's file position instead of appending after it.
+		var source =
+			".snes\n.bank 0\n.org $8000\nMarker_A:\n    sei\n    sei\nMarker_B:\n\n" +
+			".bank 1\n.org $8000\nMarker_C:\n    clv\n\n" +
+			".bank 0\nMarker_D:\n    clc\n";
+		var (code, _, analyzer, _) = Assemble(source);
+
+		Assert.True(analyzer.SymbolTable.TryGetSymbol("Marker_B", out var markerB));
+		Assert.True(analyzer.SymbolTable.TryGetSymbol("Marker_D", out var markerD));
+		Assert.Equal(0, markerD!.Bank);
+		Assert.Equal(markerB!.Value, markerD.Value); // both resolve to $8002
+
+		Assert.Equal(0x78, code[0]); // sei
+		Assert.Equal(0x78, code[1]); // sei (must survive, not be overwritten)
+		Assert.Equal(0x18, code[2]); // clc, appended after both seis
 	}
 }

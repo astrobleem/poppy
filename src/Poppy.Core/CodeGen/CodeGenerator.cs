@@ -41,6 +41,15 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 	private long _bankRomOffset = -1;     // ROM file offset of current bank start
 	private long _bankCpuBase = -1;       // CPU base address of banked window
 
+	// Per-bank saved address cursor, keyed by bank number. A `.bank N` with no
+	// following `.org` must resume from wherever bank N's own code last left
+	// off, not from wherever some OTHER bank happened to leave `_currentAddress`
+	// (that mismatch was a real silent-corruption bug, see poppy#390: labels
+	// and bytes disagreed with each other after a bank round-trip because this
+	// dictionary didn't exist and `_currentAddress` was reset unconditionally
+	// on every `.bank`, discarding that bank's own prior progress).
+	private readonly Dictionary<int, long> _bankCursors = new();
+
 	// 65816 M/X flag tracking for correct immediate operand sizes (profile-owned)
 	private ProcessorState? _processorState;
 
@@ -838,6 +847,15 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 			return;
 		}
 
+		// Save the OUTGOING bank's cursor before switching away from it, so a
+		// later `.bank <that bank>` with no `.org` resumes where it left off
+		// instead of picking up whatever address this new bank ends at
+		// (poppy#390 -- the two were unrelated numbers and neither pass agreed
+		// with the other, corrupting both the symbol table and the bytes).
+		if (_currentBank >= 0) {
+			_bankCursors[_currentBank] = _currentAddress;
+		}
+
 		_currentBank = bankNumber;
 
 		// Auto-detect bank size if not explicitly set
@@ -848,10 +866,24 @@ public sealed class CodeGenerator : IAstVisitor<object?>, ICodeEmitter {
 		_bankRomOffset = (long)bankNumber * _bankSize;
 		_bankCpuBase = GetBankCpuBase();
 
-		// Create a new segment at the bank's ROM offset
-		_currentAddress = _bankCpuBase >= 0 ? _bankCpuBase : _bankRomOffset;
+		// Resume this bank's own previously-saved cursor if it has one;
+		// otherwise (first visit) default to the bank's CPU base, same as
+		// before. An explicit `.org` right after `.bank N` still overrides
+		// this via HandleOrgDirective, which runs after this method returns.
+		_currentAddress = _bankCursors.TryGetValue(bankNumber, out var savedAddress)
+			? savedAddress
+			: (_bankCpuBase >= 0 ? _bankCpuBase : _bankRomOffset);
+
+		// The new segment's ROM file offset must account for how far into
+		// the bank `_currentAddress` already is on a resume (poppy#390 part
+		// 2: getting `_currentAddress` right above isn't enough on its own
+		// -- without this, every resumed bank's bytes still landed at the
+		// bank's very first file byte, silently overwriting whatever was
+		// already there, even though the symbol table was by then correct).
+		// Mirrors HandleOrgDirective's own offsetInBank computation above.
+		var offsetInBank = _bankCpuBase >= 0 ? _currentAddress - _bankCpuBase : 0L;
 		_currentSegment = new OutputSegment(_currentAddress) {
-			RomOffset = _bankRomOffset,
+			RomOffset = _bankRomOffset + offsetInBank,
 			Bank = _currentBank
 		};
 		_segments.Add(_currentSegment);

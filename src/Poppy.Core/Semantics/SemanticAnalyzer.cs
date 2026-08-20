@@ -115,6 +115,18 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 	public int BankSize { get; private set; }
 
 	/// <summary>
+	/// Per-bank saved address cursor, keyed by bank number. A `.bank N` with
+	/// no following `.org` must resume from wherever bank N's own code last
+	/// left off, not silently inherit whatever address some OTHER bank left
+	/// `CurrentAddress` at (poppy#390 -- this dictionary didn't exist before,
+	/// so `HandleBankDirective` below only ever updated `CurrentBank`,
+	/// leaving `CurrentAddress` carrying over the wrong bank's progress and
+	/// disagreeing with CodeGenerator's own, differently-wrong reset-to-base
+	/// behavior; labels and bytes ended up at two different addresses).
+	/// </summary>
+	private readonly Dictionary<int, long> _bankCursors = new();
+
+	/// <summary>
 	/// Gets or sets whether to auto-generate labels for JSR/JMP targets that don't have a label.
 	/// When enabled, creates labels like "sub_8100" for JSR targets and "loc_8200" for JMP targets.
 	/// </summary>
@@ -169,6 +181,7 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 		_pass = 1;
 		CurrentAddress = 0;
 		CurrentBank = -1;
+		_bankCursors.Clear();
 		_sectionStart = 0;
 		_sectionBank = -1;
 		_orgSections.Clear();
@@ -193,6 +206,7 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 		_pass = 2;
 		CurrentAddress = 0;
 		CurrentBank = -1;
+		_bankCursors.Clear();
 		ResetModeTracking();
 		program.Accept(this);
 
@@ -1137,7 +1151,31 @@ public sealed class SemanticAnalyzer : IAstVisitor<object?> {
 			return;
 		}
 
+		// Save the OUTGOING bank's cursor before switching away from it
+		// (poppy#390 -- see the _bankCursors field comment above;
+		// CodeGenerator.HandleBankDirective mirrors this exact logic so
+		// labels, assigned here in the analysis pass, land at the same
+		// address CodeGenerator later places that instruction's bytes at).
+		if (CurrentBank >= 0) {
+			_bankCursors[CurrentBank] = CurrentAddress;
+		}
+
 		CurrentBank = bankNumber;
+
+		// Resume this bank's own previously-saved cursor if it has one;
+		// otherwise (first visit to this bank) default to the bank's CPU
+		// base, same as CodeGenerator does. Profiles with no banked CPU
+		// window (GetBankCpuBase returns -1) leave CurrentAddress untouched,
+		// same as before this fix -- `.bank` alone never affected address
+		// tracking for those targets and still doesn't.
+		if (_bankCursors.TryGetValue(bankNumber, out var savedAddress)) {
+			CurrentAddress = savedAddress;
+		} else {
+			var cpuBase = _profile?.GetBankCpuBase(bankNumber) ?? -1;
+			if (cpuBase >= 0) {
+				CurrentAddress = cpuBase;
+			}
+		}
 	}
 
 	/// <summary>
